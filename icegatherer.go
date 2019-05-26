@@ -23,12 +23,16 @@ type ICEGatherer struct {
 
 	agent *ice.Agent
 
+	trickle           bool
 	portMin           uint16
 	portMax           uint16
 	connectionTimeout *time.Duration
 	keepaliveInterval *time.Duration
 	loggerFactory     logging.LoggerFactory
 	networkTypes      []NetworkType
+	log               logging.LeveledLogger
+
+	onCandidateHdlr func(candidate *ICECandidate)
 }
 
 // NewICEGatherer creates a new NewICEGatherer.
@@ -38,6 +42,7 @@ func NewICEGatherer(
 	connectionTimeout *time.Duration,
 	keepaliveInterval *time.Duration,
 	loggerFactory logging.LoggerFactory,
+	trickle bool,
 	networkTypes []NetworkType,
 	opts ICEGatherOptions,
 ) (*ICEGatherer, error) {
@@ -52,7 +57,7 @@ func NewICEGatherer(
 		}
 	}
 
-	return &ICEGatherer{
+	g := &ICEGatherer{
 		state:             ICEGathererStateNew,
 		validatedServers:  validatedServers,
 		portMin:           portMin,
@@ -60,24 +65,15 @@ func NewICEGatherer(
 		connectionTimeout: connectionTimeout,
 		keepaliveInterval: keepaliveInterval,
 		loggerFactory:     loggerFactory,
+		trickle:           trickle,
 		networkTypes:      networkTypes,
-	}, nil
-}
-
-// State indicates the current state of the ICE gatherer.
-func (g *ICEGatherer) State() ICEGathererState {
-	g.lock.RLock()
-	defer g.lock.RUnlock()
-	return g.state
-}
-
-// Gather ICE candidates.
-func (g *ICEGatherer) Gather() error {
-	g.lock.Lock()
-	defer g.lock.Unlock()
+		onCandidateHdlr:   opts.OnCandidate,
+		log:               loggerFactory.NewLogger("ice"),
+	}
 
 	config := &ice.AgentConfig{
 		Urls:              g.validatedServers,
+		Trickle:           g.trickle,
 		PortMin:           g.portMin,
 		PortMax:           g.portMax,
 		ConnectionTimeout: g.connectionTimeout,
@@ -96,13 +92,62 @@ func (g *ICEGatherer) Gather() error {
 
 	agent, err := ice.NewAgent(config)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	if err := agent.OnCandidate(func(candidate ice.Candidate) {
+		g.lock.Lock()
+		defer g.lock.Unlock()
+
+		if candidate != nil {
+			c, err := newICECandidateFromICE(candidate)
+			if err != nil {
+				g.log.Warnf("Failed to convert ice.Candidate: %s", err)
+				return
+			}
+
+			if g.onCandidateHdlr != nil {
+				g.onCandidateHdlr(&c)
+			}
+		} else {
+			g.state = ICEGathererStateComplete
+			if g.onCandidateHdlr != nil {
+				g.onCandidateHdlr(nil)
+			}
+		}
+	}); err != nil {
+		return nil, err
 	}
 
 	g.agent = agent
-	g.state = ICEGathererStateComplete
+	return g, nil
+}
 
-	return nil
+// State indicates the current state of the ICE gatherer.
+func (g *ICEGatherer) State() ICEGathererState {
+	g.lock.RLock()
+	defer g.lock.RUnlock()
+	return g.state
+}
+
+// Gather ICE candidates.
+func (g *ICEGatherer) Gather() error {
+	g.lock.Lock()
+	defer g.lock.Unlock()
+
+	g.state = ICEGathererStateGathering
+
+	requestedNetworkTypes := g.networkTypes
+	if len(requestedNetworkTypes) == 0 {
+		requestedNetworkTypes = supportedNetworkTypes
+	}
+
+	networkTypes := make([]ice.NetworkType, 0)
+	for _, typ := range requestedNetworkTypes {
+		networkTypes = append(networkTypes, ice.NetworkType(typ))
+	}
+
+	return g.agent.GatherCandidates(g.validatedServers, networkTypes)
 }
 
 // Close prunes all local candidates, and closes the ports.

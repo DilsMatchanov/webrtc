@@ -25,6 +25,7 @@ type SettingEngine struct {
 		ICEKeepalive  *time.Duration
 	}
 	candidates struct {
+		ICETrickle      bool
 		ICENetworkTypes []NetworkType
 	}
 	LoggerFactory logging.LoggerFactory
@@ -61,4 +62,10 @@ func (e *SettingEngine) SetEphemeralUDPPortRange(portMin, portMax uint16) error 
 // during local and server reflexive gathering.
 func (e *SettingEngine) SetNetworkTypes(candidateTypes []NetworkType) {
 	e.candidates.ICENetworkTypes = candidateTypes
+}
+
+// SetTrickle configures the usage of the trickle based gathering process.
+// https://tools.ietf.org/html/draft-ietf-ice-trickle-21
+func (e *SettingEngine) SetTrickle(trickle bool) {
+	e.candidates.ICETrickle = trickle
 }

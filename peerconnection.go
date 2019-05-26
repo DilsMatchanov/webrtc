@@ -7,12 +7,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	mathRand "math/rand"
-	"regexp"
-
 	"fmt"
 	"io"
+	mathRand "math/rand"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +21,7 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/sdp/v2"
+
 	"github.com/pion/webrtc/v2/internal/util"
 	"github.com/pion/webrtc/v2/pkg/rtcerr"
 )
@@ -130,12 +130,6 @@ func (api *API) NewPeerConnection(configuration Configuration) (*PeerConnection,
 		return nil, err
 	}
 	pc.iceGatherer = gatherer
-
-	err = pc.gather()
-
-	if err != nil {
-		return nil, err
-	}
 
 	// Create the ice transport
 	iceTransport := pc.createICETransport()
@@ -540,6 +534,21 @@ func (pc *PeerConnection) CreateOffer(options *OfferOptions) (SessionDescription
 func (pc *PeerConnection) createICEGatherer() (*ICEGatherer, error) {
 	g, err := pc.api.NewICEGatherer(ICEGatherOptions{
 		ICEServers: pc.configuration.ICEServers,
+		OnCandidate: func(candidate *ICECandidate) {
+			pc.mu.Lock()
+			defer pc.mu.Unlock()
+
+			if pc.onICECandidateHandler != nil {
+				go pc.onICECandidateHandler(candidate)
+			}
+
+			if candidate == nil {
+				pc.iceGatheringState = ICEGatheringStateComplete
+				if pc.onICEGatheringStateChangeHandler != nil {
+					go pc.onICEGatheringStateChangeHandler()
+				}
+			}
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -549,6 +558,10 @@ func (pc *PeerConnection) createICEGatherer() (*ICEGatherer, error) {
 }
 
 func (pc *PeerConnection) gather() error {
+	pc.iceGatheringState = ICEGatheringStateGathering
+	if pc.onICEGatheringStateChangeHandler != nil {
+		go pc.onICEGatheringStateChangeHandler()
+	}
 	return pc.iceGatherer.Gather()
 }
 
@@ -871,8 +884,6 @@ func (pc *PeerConnection) SetLocalDescription(desc SessionDescription) error {
 		}
 	}
 
-	// TODO: Initiate ICE candidate gathering?
-
 	desc.parsed = &sdp.SessionDescription{}
 	if err := desc.parsed.Unmarshal([]byte(desc.SDP)); err != nil {
 		return err
@@ -881,11 +892,17 @@ func (pc *PeerConnection) SetLocalDescription(desc SessionDescription) error {
 		return err
 	}
 
-	// Call the appropriate event handlers to signal that ICE candidate gathering
-	// is complete. In reality it completed a while ago, but triggering these
-	// events helps maintain API compatibility with the JavaScript/Wasm bindings.
-	if err := pc.signalICECandidateGatheringComplete(); err != nil {
-		return err
+	if pc.api.settingEngine.candidates.ICETrickle {
+		if err := pc.gather(); err != nil {
+			return err
+		}
+	} else {
+		// Call the appropriate event handlers to signal that ICE candidate gathering
+		// is complete. In reality it completed a while ago, but triggering these
+		// events helps maintain API compatibility with the JavaScript/Wasm bindings.
+		if err := pc.signalICECandidateGatheringComplete(); err != nil {
+			return err
+		}
 	}
 
 	return nil

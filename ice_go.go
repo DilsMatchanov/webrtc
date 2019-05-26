@@ -12,6 +12,7 @@ func (api *API) NewICEGatherer(opts ICEGatherOptions) (*ICEGatherer, error) {
 		api.settingEngine.timeout.ICEConnection,
 		api.settingEngine.timeout.ICEKeepalive,
 		api.settingEngine.LoggerFactory,
+		api.settingEngine.candidates.ICETrickle,
 		api.settingEngine.candidates.ICENetworkTypes,
 		opts,
 	)
